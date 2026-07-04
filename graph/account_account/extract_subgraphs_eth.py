@@ -1,21 +1,15 @@
 """
 extract_subgraphs_eth.py — ego-subgraph extraction for graph_eth.pt.
 
-Identical logic to extract_subgraphs.py but works on the address<->address
-directed graph produced by build_graph_eth.py.
+Usage:
+  python3 extract_subgraphs_eth.py               # hop=1, suffix=""
+  python3 extract_subgraphs_eth.py --hops 2      # hop=2, suffix="_2hop"
+  python3 extract_subgraphs_eth.py --hops 2 --suffix "_2hop"
 
-Key differences vs extract_subgraphs.py:
-  - No token nodes / node_type / token_global_id
-  - edge_attr dim=7: [value_eth, gas_used, is_erc20, is_erc721, is_erc1155,
-                       is_normal, is_internal]
-  - Graph is directed (real from->to from raw tx); k_hop_subgraph still
-    works correctly on directed graphs with undirected=False (default)
-  - Labeled mask covers only N_labeled nodes; context nodes are included
-    in subgraphs as neighbors but never as centers
-
-MAX_NODES = 5000 cap preserved (same rationale).
+Output files: subgraphs_eth{suffix}_{train,val,test}.pt
 """
 
+import argparse
 import torch
 import numpy as np
 from torch_geometric.data import Data
@@ -43,9 +37,9 @@ def extract_subgraph(data: Data, center_idx: int,
         was_capped = True
         rng = np.random.default_rng(seed if seed is not None else center_idx)
 
-        is_center     = (subset == center_idx)
-        center_local  = is_center.nonzero(as_tuple=True)[0]
-        other_pos     = (~is_center).nonzero(as_tuple=True)[0]
+        is_center    = (subset == center_idx)
+        center_local = is_center.nonzero(as_tuple=True)[0]
+        other_pos    = (~is_center).nonzero(as_tuple=True)[0]
 
         n_keep   = min(MAX_NEIGHBORS, other_pos.numel())
         keep_pos = rng.choice(other_pos.numpy(), size=n_keep, replace=False)
@@ -54,7 +48,7 @@ def extract_subgraph(data: Data, center_idx: int,
         kept_local     = torch.cat([center_local, keep_pos])
         kept_local_set = set(kept_local.tolist())
 
-        src, dst = edge_index
+        src, dst  = edge_index
         edge_keep = torch.tensor(
             [i for i, (s, d) in enumerate(zip(src.tolist(), dst.tolist()))
              if s in kept_local_set and d in kept_local_set],
@@ -72,11 +66,8 @@ def extract_subgraph(data: Data, center_idx: int,
         edge_mask = original_edge_mask_indices[edge_keep]
         mapping   = torch.tensor([old_to_new[center_local[0].item()]], dtype=torch.long)
 
-    n = subset.numel()
-    x = data.x[subset]   # all nodes have real features (or zeros for context)
-
     return Data(
-        x=x,
+        x=data.x[subset],
         edge_index=edge_index,
         edge_attr=data.edge_attr[edge_mask],
         y=data.y[center_idx].view(1),
@@ -96,20 +87,28 @@ def build_subgraphs(data: Data, indices, num_hops: int = 1):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hops",   type=int, default=1,   help="num_hops dla k_hop_subgraph")
+    parser.add_argument("--suffix", type=str, default="",  help="suffix nazwy pliku wyjściowego")
+    args = parser.parse_args()
+
     data = torch.load("graph_eth.pt", weights_only=False)
 
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     val_idx   = data.val_mask.nonzero(as_tuple=True)[0]
     test_idx  = data.test_mask.nonzero(as_tuple=True)[0]
 
+    print(f"num_hops={args.hops}  suffix='{args.suffix}'")
+
     for split, idx in [("train", train_idx), ("val", val_idx), ("test", test_idx)]:
         print(f"\n{split}:")
-        subgraphs = build_subgraphs(data, idx, num_hops=1)
-        sizes     = torch.tensor([s.num_nodes for s in subgraphs], dtype=torch.float32)
-        n_capped  = sum(s.was_capped.item() for s in subgraphs)
+        subgraphs  = build_subgraphs(data, idx, num_hops=args.hops)
+        sizes      = torch.tensor([s.num_nodes for s in subgraphs], dtype=torch.float32)
+        n_capped   = sum(s.was_capped.item() for s in subgraphs)
         n_isolated = int((sizes == 1).sum())
         print(f"  {len(subgraphs)} subgraphs | "
               f"avg_nodes={sizes.mean():.2f} | max={int(sizes.max())} | "
               f"capped={n_capped} | isolated={n_isolated} ({100*n_isolated/len(subgraphs):.1f}%)")
-        torch.save(subgraphs, f"subgraphs_eth_{split}.pt")
-        print(f"  saved -> subgraphs_eth_{split}.pt")
+        fname = f"subgraphs_eth{args.suffix}_{split}.pt"
+        torch.save(subgraphs, fname)
+        print(f"  saved -> {fname}")
