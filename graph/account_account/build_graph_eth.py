@@ -2,37 +2,40 @@
 build_graph_eth.py — address<->address graph from ETHdata (Kaggle real-cats).
 
 Reads raw per-address transaction files from ETHdata/:
-  {address}/normal_txs.csv      : ETH transfers (from, to, value, gas, ...)
-  {address}/erc20_txs.csv       : ERC20 token transfers
-  {address}/erc721_txs.csv      : ERC721 token transfers
-  {address}/erc1155_txs.csv     : ERC1155 token transfers
+  {address}/normal_transactions.json    : ETH transfers
+  {address}/ERC_20_transactions.json    : ERC20 token transfers
+  {address}/ERC_721_transactions.json   : ERC721 token transfers
+  {address}/ERC_1155_transactions.json  : ERC1155 token transfers
+  {address}/internal_transactions.json  : internal calls
 
 Node-ID space:
-  All unique addresses encountered across BE/CE + raw tx files.
-  Only BE/CE addresses get labels (y); others are unlabeled context nodes.
+  [0, N_labeled)   : BE/CE addresses with labels + 48-dim features
+  [N_labeled, ...)  : context nodes (counterparty addresses from raw tx)
+                      zero features, label=-1 (ignored in loss)
 
 Edge features [7]:
   [value_eth, gas_used, is_erc20, is_erc721, is_erc1155, is_normal, is_internal]
 
-Output: graph_eth.pt  (same interface as graph.pt from build_graph.py)
+Output: graph_eth.pt
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 
-DATA_DIR     = "./real-cats"
-ETHDATA_DIR  = "./ETHdata"   # path to extracted ETHdata/ from Kaggle
+DATA_DIR      = "./real-cats"
+ETHDATA_DIR   = "./ETHdata"
 EDGE_ATTR_DIM = 7
 
 NON_NUMERIC_ID_COLS = [
     'max_sent_transaction_id', 'min_sent_transaction_id',
     'max_received_transaction_id', 'min_received_transaction_id',
 ]
-DATETIME_COLS    = ['first_time', 'last_time']
+DATETIME_COLS     = ['first_time', 'last_time']
 VERIFICATION_COLS = ['etherscan_checked', 'watchback_checked', 'gs_checked']
 
 
@@ -66,67 +69,83 @@ def build_address_features(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# 2. Parse ETHdata raw tx files -> edge list
+# 2. Parse ETHdata JSON files -> edge rows
 # ---------------------------------------------------------------------------
 
-def safe_read(path: str, cols: list) -> pd.DataFrame:
-    """Read CSV, return empty frame if file missing or unreadable."""
+def load_json(path: str) -> list:
+    """Load JSON file, return empty list if missing or malformed."""
     if not os.path.exists(path):
-        return pd.DataFrame(columns=cols)
+        return []
     try:
-        df = pd.read_csv(path, low_memory=False)
-        for c in cols:
-            if c not in df.columns:
-                df[c] = 0
-        return df[cols]
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
     except Exception:
-        return pd.DataFrame(columns=cols)
+        return []
 
 
-def parse_eth_address(addr_folder: str) -> pd.DataFrame:
+def parse_eth_address(addr_folder: str) -> list:
     """
-    Returns edge rows: [from, to, value_eth, gas_used,
-                        is_erc20, is_erc721, is_erc1155, is_normal, is_internal]
+    Returns list of edge tuples:
+      (from, to, value_eth, gas_used,
+       is_erc20, is_erc721, is_erc1155, is_normal, is_internal)
     """
     rows = []
 
     # normal ETH transfers
-    df = safe_read(f"{addr_folder}/normal_txs.csv",
-                   ['from', 'to', 'value', 'gasUsed', 'isError'])
-    df = df[df['isError'].astype(str) == '0']
-    for _, r in df.iterrows():
-        rows.append((str(r['from']).lower(), str(r['to']).lower(),
-                     float(r['value']) / 1e18, float(r['gasUsed']),
-                     0, 0, 0, 1, 0))
+    for r in load_json(f"{addr_folder}/normal_transactions.json"):
+        if str(r.get('isError', '0')) != '0':
+            continue
+        frm = str(r.get('from', '')).lower()
+        to  = str(r.get('to',   '')).lower()
+        if not frm or not to:
+            continue
+        value    = float(r.get('value', 0)) / 1e18
+        gas_used = float(r.get('gasUsed', 0))
+        rows.append((frm, to, value, gas_used, 0, 0, 0, 1, 0))
 
     # ERC20
-    df = safe_read(f"{addr_folder}/erc20_txs.csv",
-                   ['from', 'to', 'value', 'gasUsed'])
-    for _, r in df.iterrows():
-        rows.append((str(r['from']).lower(), str(r['to']).lower(),
-                     float(r['value']), float(r['gasUsed']),
-                     1, 0, 0, 0, 0))
+    for r in load_json(f"{addr_folder}/ERC_20_transactions.json"):
+        frm = str(r.get('from', '')).lower()
+        to  = str(r.get('to',   '')).lower()
+        if not frm or not to:
+            continue
+        # ERC20 value is in token units; normalize to float, not ETH
+        value    = float(r.get('value', 0))
+        gas_used = float(r.get('gasUsed', 0))
+        rows.append((frm, to, value, gas_used, 1, 0, 0, 0, 0))
 
     # ERC721
-    df = safe_read(f"{addr_folder}/erc721_txs.csv",
-                   ['from', 'to', 'gasUsed'])
-    for _, r in df.iterrows():
-        rows.append((str(r['from']).lower(), str(r['to']).lower(),
-                     0.0, float(r['gasUsed']),
-                     0, 1, 0, 0, 0))
+    for r in load_json(f"{addr_folder}/ERC_721_transactions.json"):
+        frm = str(r.get('from', '')).lower()
+        to  = str(r.get('to',   '')).lower()
+        if not frm or not to:
+            continue
+        gas_used = float(r.get('gasUsed', 0))
+        rows.append((frm, to, 0.0, gas_used, 0, 1, 0, 0, 0))
 
     # ERC1155
-    df = safe_read(f"{addr_folder}/erc1155_txs.csv",
-                   ['from', 'to', 'gasUsed'])
-    for _, r in df.iterrows():
-        rows.append((str(r['from']).lower(), str(r['to']).lower(),
-                     0.0, float(r['gasUsed']),
-                     0, 0, 1, 0, 0))
+    for r in load_json(f"{addr_folder}/ERC_1155_transactions.json"):
+        frm = str(r.get('from', '')).lower()
+        to  = str(r.get('to',   '')).lower()
+        if not frm or not to:
+            continue
+        gas_used = float(r.get('gasUsed', 0))
+        rows.append((frm, to, 0.0, gas_used, 0, 0, 1, 0, 0))
 
-    return pd.DataFrame(rows, columns=[
-        'from', 'to', 'value_eth', 'gas_used',
-        'is_erc20', 'is_erc721', 'is_erc1155', 'is_normal', 'is_internal'
-    ])
+    # internal
+    for r in load_json(f"{addr_folder}/internal_transactions.json"):
+        if str(r.get('isError', '0')) != '0':
+            continue
+        frm = str(r.get('from', '')).lower()
+        to  = str(r.get('to',   '')).lower()
+        if not frm or not to:
+            continue
+        value    = float(r.get('value', 0)) / 1e18
+        gas_used = float(r.get('gasUsed', 0))
+        rows.append((frm, to, value, gas_used, 0, 0, 0, 0, 1))
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -141,46 +160,59 @@ def build_graph(data_dir: str = DATA_DIR, ethdata_dir: str = ETHDATA_DIR):
     print(f"Labeled addresses: {N_labeled}  (BE+CE)")
     print(f"Scanning ETHdata folders...")
 
-    all_edges = []
-    folders = [f for f in os.listdir(ethdata_dir)
-               if os.path.isdir(os.path.join(ethdata_dir, f))]
-    for i, folder in enumerate(folders):
-        if i % 1000 == 0:
-            print(f"  {i}/{len(folders)}...")
-        edges = parse_eth_address(os.path.join(ethdata_dir, folder))
-        all_edges.append(edges)
+    folders = sorted([
+        f for f in os.listdir(ethdata_dir)
+        if os.path.isdir(os.path.join(ethdata_dir, f))
+    ])
 
-    edges = pd.concat(all_edges, ignore_index=True)
+    all_rows = []
+    for i, folder in enumerate(folders):
+        if i % 2000 == 0:
+            print(f"  {i}/{len(folders)}...")
+        rows = parse_eth_address(os.path.join(ethdata_dir, folder))
+        all_rows.extend(rows)
+
+    print(f"Raw edges: {len(all_rows)}")
+
+    if not all_rows:
+        raise RuntimeError(
+            "Brak krawędzi -- sprawdź ETHDATA_DIR i strukturę plików JSON."
+        )
+
+    edges = pd.DataFrame(all_rows, columns=[
+        'from', 'to', 'value_eth', 'gas_used',
+        'is_erc20', 'is_erc721', 'is_erc1155', 'is_normal', 'is_internal'
+    ])
     edges = edges.dropna(subset=['from', 'to'])
     edges = edges[edges['from'] != edges['to']]  # drop self-loops
-    print(f"Raw edges: {len(edges)}")
+    # drop null/empty addresses
+    edges = edges[edges['from'].str.startswith('0x')]
+    edges = edges[edges['to'].str.startswith('0x')]
+    print(f"Edges after filtering: {len(edges)}")
 
-    # Build global address map (labeled + unlabeled context nodes)
+    # Build global address map
     all_addrs = set(edges['from']) | set(edges['to']) | set(labeled_to_id.keys())
-    # labeled addresses get ids 0..N_labeled-1 (preserving order)
     global_to_id = dict(labeled_to_id)
     next_id = N_labeled
     for addr in sorted(all_addrs):
         if addr not in global_to_id:
             global_to_id[addr] = next_id
             next_id += 1
-    N_total = next_id
+    N_total   = next_id
     N_context = N_total - N_labeled
     print(f"Context (unlabeled) nodes: {N_context}")
     print(f"Total nodes: {N_total}")
 
-    # Node features: labeled get real features, context get zeros
+    # Node features
     x = torch.zeros((N_total, x_labeled.size(1)), dtype=torch.float32)
     x[:N_labeled] = x_labeled
 
-    # Labels: labeled get real labels, context get -1 (ignored in loss)
+    # Labels: -1 for context nodes (ignored in loss)
     y_full = torch.full((N_total,), -1, dtype=torch.long)
     y_full[:N_labeled] = y
 
     # Edge tensors
-    src = edges['from'].map(global_to_id).dropna().to_numpy(dtype=np.int64)
-    dst = edges['to'].map(global_to_id).dropna().to_numpy(dtype=np.int64)
-    valid = (edges['from'].isin(global_to_id)) & (edges['to'].isin(global_to_id))
+    valid = edges['from'].isin(global_to_id) & edges['to'].isin(global_to_id)
     edges = edges[valid]
     src = edges['from'].map(global_to_id).to_numpy(dtype=np.int64)
     dst = edges['to'].map(global_to_id).to_numpy(dtype=np.int64)
@@ -189,19 +221,18 @@ def build_graph(data_dir: str = DATA_DIR, ethdata_dir: str = ETHDATA_DIR):
                  'is_erc20', 'is_erc721', 'is_erc1155', 'is_normal', 'is_internal']
     attr = edges[attr_cols].to_numpy(dtype=np.float32)
 
-    # Directed graph (from -> to) -- we have real direction from raw tx
     edge_index = torch.tensor(np.stack([src, dst]), dtype=torch.long)
     edge_attr  = torch.tensor(attr, dtype=torch.float32)
 
     data = Data(x=x, y=y_full, edge_index=edge_index, edge_attr=edge_attr)
-    data.N_labeled  = N_labeled
-    data.N_context  = N_context
-    data.num_feat   = len(feat_cols)
+    data.N_labeled    = N_labeled
+    data.N_context    = N_context
+    data.num_feat     = len(feat_cols)
     data.EDGE_ATTR_DIM = EDGE_ATTR_DIM
 
     # Stratified split on labeled nodes only
-    idx    = np.arange(N_labeled)
-    y_np   = y.numpy()
+    idx   = np.arange(N_labeled)
+    y_np  = y.numpy()
     train_idx, test_idx = train_test_split(idx, test_size=0.2, stratify=y_np, random_state=42)
     train_idx, val_idx  = train_test_split(
         train_idx, test_size=0.1, stratify=y_np[train_idx], random_state=42)
@@ -223,8 +254,10 @@ if __name__ == "__main__":
     print(f"feat_dim   = {data.num_feat}")
     print(f"edge_attr  = {data.edge_attr.shape}  "
           f"(value_eth, gas_used, is_erc20, is_erc721, is_erc1155, is_normal, is_internal)")
-    print(f"label counts: {torch.bincount(data.y[data.y >= 0]).tolist()}")
-    print(f"train/val/test: {data.train_mask.sum().item()}/"
-          f"{data.val_mask.sum().item()}/{data.test_mask.sum().item()}")
+    print(f"label counts (0=benign, 1=criminal): "
+          f"{torch.bincount(data.y[data.y >= 0]).tolist()}")
+    print(f"train/val/test: {data.train_mask[:data.N_labeled].sum().item()}/"
+          f"{data.val_mask[:data.N_labeled].sum().item()}/"
+          f"{data.test_mask[:data.N_labeled].sum().item()}")
     torch.save(data, "graph_eth.pt")
     print("Saved -> graph_eth.pt")
