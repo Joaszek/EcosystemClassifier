@@ -88,18 +88,18 @@ echo "  ETHdata/: $(ls ./ETHdata 2>/dev/null | wc -l) folderów adresów"
 # ---------------------------------------------------------------------------
 echo ""
 echo "[3/5] Budowanie grafu address<->address (graph_eth.pt)..."
-python3 graph/build_graph_eth.py
+python3 graph/account_account/build_graph_eth.py
 
 # ---------------------------------------------------------------------------
 # 4. Ekstrakcja subgrafów -- hop 1 i hop 2
 # ---------------------------------------------------------------------------
 echo ""
 echo "[4/5] Ekstrakcja subgrafów hop=1..."
-python3 graph/extract_subgraphs_eth.py --hops 1 --suffix ""
+python3 graph/account_account/extract_subgraphs_eth.py --hops 1 --suffix ""
 
 echo ""
 echo "[5/5] Ekstrakcja subgrafów hop=2..."
-python3 graph/extract_subgraphs_eth.py --hops 2 --suffix "_2hop"
+python3 graph/account_account/extract_subgraphs_eth.py --hops 2 --suffix "_2hop"
 
 echo ""
 echo "============================================"
