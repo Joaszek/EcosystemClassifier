@@ -1,0 +1,4 @@
+
+paths:
+  real_cats: ./real-cats
+  ethdata: ./ETHdata

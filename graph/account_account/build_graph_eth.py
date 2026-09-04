@@ -20,15 +20,21 @@ Output: graph_eth.pt
 """
 
 import os
+import sys
 import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 
-DATA_DIR      = "./real-cats"
-ETHDATA_DIR   = "./ETHdata"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from config import get_path
+
+DATA_DIR      = get_path("real_cats")
+ETHDATA_DIR   = get_path("ethdata")
 EDGE_ATTR_DIM = 7
 
 NON_NUMERIC_ID_COLS = [
@@ -62,7 +68,7 @@ def build_address_features(df: pd.DataFrame):
     drop = ['address', 'label', 'binary_label'] + NON_NUMERIC_ID_COLS + VERIFICATION_COLS
     feat_cols = [c for c in df.columns if c not in drop]
     X = df[feat_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-    x = torch.tensor(X.values, dtype=torch.float32)
+    x = torch.tensor(X.values, dtype=torch.float64)
     y = torch.tensor(df['binary_label'].values, dtype=torch.long)
     address_to_id = {a.lower(): i for i, a in enumerate(df['address'])}
     return x, y, address_to_id, feat_cols
@@ -204,7 +210,7 @@ def build_graph(data_dir: str = DATA_DIR, ethdata_dir: str = ETHDATA_DIR):
     print(f"Total nodes: {N_total}")
 
     # Node features
-    x = torch.zeros((N_total, x_labeled.size(1)), dtype=torch.float32)
+    x = torch.zeros((N_total, x_labeled.size(1)), dtype=torch.float64)
     x[:N_labeled] = x_labeled
 
     # Labels: -1 for context nodes (ignored in loss)
@@ -219,10 +225,10 @@ def build_graph(data_dir: str = DATA_DIR, ethdata_dir: str = ETHDATA_DIR):
 
     attr_cols = ['value_eth', 'gas_used',
                  'is_erc20', 'is_erc721', 'is_erc1155', 'is_normal', 'is_internal']
-    attr = edges[attr_cols].to_numpy(dtype=np.float32)
+    attr = edges[attr_cols].to_numpy(dtype=np.float64)
 
     edge_index = torch.tensor(np.stack([src, dst]), dtype=torch.long)
-    edge_attr  = torch.tensor(attr, dtype=torch.float32)
+    edge_attr  = torch.tensor(attr, dtype=torch.float64)
 
     data = Data(x=x, y=y_full, edge_index=edge_index, edge_attr=edge_attr)
     data.N_labeled    = N_labeled

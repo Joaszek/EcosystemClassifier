@@ -87,20 +87,31 @@ def build_subgraphs(data: Data, indices, num_hops: int = 1):
 
 
 if __name__ == "__main__":
+    import os
     parser = argparse.ArgumentParser()
     parser.add_argument("--hops",   type=int, default=1,   help="num_hops dla k_hop_subgraph")
     parser.add_argument("--suffix", type=str, default="",  help="suffix nazwy pliku wyjściowego")
+    parser.add_argument("--graph",  type=str, default="graph_eth.pt", help="ścieżka do graph_eth.pt")
+    parser.add_argument("--outdir", type=str, default=".",  help="katalog na pliki wyjściowe")
+    parser.add_argument("--splits", type=str, default="train,val,test",
+                        help="które splity wygenerować (np. 'train')")
     args = parser.parse_args()
 
-    data = torch.load("graph_eth.pt", weights_only=False)
+    data = torch.load(args.graph, weights_only=False)
 
-    train_idx = data.train_mask.nonzero(as_tuple=True)[0]
-    val_idx   = data.val_mask.nonzero(as_tuple=True)[0]
-    test_idx  = data.test_mask.nonzero(as_tuple=True)[0]
+    idx_by_split = {
+        "train": data.train_mask.nonzero(as_tuple=True)[0],
+        "val":   data.val_mask.nonzero(as_tuple=True)[0],
+        "test":  data.test_mask.nonzero(as_tuple=True)[0],
+    }
+    wanted = [s.strip() for s in args.splits.split(",") if s.strip()]
+    os.makedirs(args.outdir, exist_ok=True)
 
-    print(f"num_hops={args.hops}  suffix='{args.suffix}'")
+    print(f"num_hops={args.hops}  suffix='{args.suffix}'  graph={args.graph}  "
+          f"outdir={args.outdir}  splits={wanted}")
 
-    for split, idx in [("train", train_idx), ("val", val_idx), ("test", test_idx)]:
+    for split in wanted:
+        idx = idx_by_split[split]
         print(f"\n{split}:")
         subgraphs  = build_subgraphs(data, idx, num_hops=args.hops)
         sizes      = torch.tensor([s.num_nodes for s in subgraphs], dtype=torch.float32)
@@ -109,6 +120,6 @@ if __name__ == "__main__":
         print(f"  {len(subgraphs)} subgraphs | "
               f"avg_nodes={sizes.mean():.2f} | max={int(sizes.max())} | "
               f"capped={n_capped} | isolated={n_isolated} ({100*n_isolated/len(subgraphs):.1f}%)")
-        fname = f"subgraphs_eth{args.suffix}_{split}.pt"
+        fname = os.path.join(args.outdir, f"subgraphs_eth{args.suffix}_{split}.pt")
         torch.save(subgraphs, fname)
         print(f"  saved -> {fname}")
